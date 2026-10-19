@@ -1,0 +1,176 @@
+
+"""Hostel room allocation system with safer defaults and validation."""
+
+import html
+import os
+import secrets
+import yaml
+from flask import Flask, request
+
+# Global hostel state
+rooms = {}
+allocations = {}
+waitlist = []
+app = Flask(__name__)
+
+CONFIG = """
+blocks:
+  A: {gender: M, rooms: 3, capacity: 2, fee: 4000}
+  B: {gender: F, rooms: 2, capacity: 3, fee: 3500}
+"""
+
+
+def load_config(text=CONFIG):
+    """Load hostel configuration safely and initialize rooms."""
+    config = yaml.safe_load(text)
+    if not isinstance(config, dict) or not isinstance(
+        config.get("blocks"), dict
+    ):
+        raise ValueError("Configuration must contain a blocks mapping")
+
+    rooms.clear()
+    for block, info in config["blocks"].items():
+        for number in range(1, info["rooms"] + 1):
+            rooms[f"{block}{number}"] = {
+                "gender": info["gender"],
+                "capacity": info["capacity"],
+                "fee": info["fee"],
+                "occupants": [],
+            }
+    return config
+
+
+def allocate_room(student_id, name, gender, year, preferred=None):
+    """Allocate a student to a suitable room or add them to the waitlist."""
+    if not isinstance(year, int) or isinstance(year, bool):
+        return None
+    if student_id in allocations:
+        return allocations[student_id]["room"]
+
+    preferred = preferred or []
+    candidates = list(dict.fromkeys(preferred + list(rooms.keys())))
+
+    for room_no in candidates:
+        room = rooms.get(room_no)
+        if room is None or room["gender"] != gender:
+            continue
+        if len(room["occupants"]) >= room["capacity"]:
+            continue
+
+        room["occupants"].append(student_id)
+        allocations[student_id] = {
+            "name": name,
+            "room": room_no,
+            "year": year,
+        }
+        if student_id in waitlist:
+            waitlist.remove(student_id)
+        return room_no
+
+    if student_id not in waitlist:
+        waitlist.append(student_id)
+    return None
+
+
+def vacate_room(student_id):
+    """Remove a student from their room and allocation record."""
+    allocation = allocations.pop(student_id, None)
+    if allocation is None:
+        return False
+
+    room = rooms.get(allocation["room"])
+    if room and student_id in room["occupants"]:
+        room["occupants"].remove(student_id)
+    return True
+
+
+def monthly_fee(student_id, days_stayed):
+    """Calculate the fee for completed 30-day periods."""
+    if student_id not in allocations:
+        raise ValueError("Student has no room allocation")
+    if not isinstance(days_stayed, int) or days_stayed < 0:
+        raise ValueError("Days stayed must be a non-negative integer")
+
+    room = rooms[allocations[student_id]["room"]]
+    return (days_stayed // 30) * room["fee"]
+
+
+def priority_order(students):
+    """Sort students by year, with senior students first."""
+    return sorted(students, key=lambda student: student["year"], reverse=True)
+
+
+def room_lottery(student_ids):
+    """Randomize student order for a room lottery."""
+    return secrets.SystemRandom().sample(student_ids, len(student_ids))
+
+
+def vacant_beds():
+    """Count beds in rooms that currently have no occupants."""
+    return sum(
+        room["capacity"]
+        for room in rooms.values()
+        if not room["occupants"]
+    )
+
+
+def connect_warden_db():
+    """Read database credentials from environment variables."""
+    password = os.environ.get("WARDEN_DB_PASSWORD")
+    if not password:
+        raise RuntimeError("Set the WARDEN_DB_PASSWORD environment variable")
+    return sqlite_connect(
+        host="localhost",
+        user="warden",
+        password=password,
+    )
+
+
+def sqlite_connect(host, user, password):
+    """Simulate a database connection result for this lab."""
+    return {"host": host, "user": user, "connected": bool(password)}
+
+
+@app.route("/room")
+def room_lookup():
+    """Return the room allocation for the requested student ID."""
+    student_id = request.args.get("id", "")
+    safe_id = html.escape(student_id)
+    allocation = html.escape(str(allocations.get(student_id)))
+    return f"<h1>Room for {safe_id}: {allocation}</h1>"
+
+
+def run_portal():
+    """Run the Flask application without debug mode."""
+    app.run(debug=False)
+
+
+def main():
+    """Demonstrate the hostel allocation functions."""
+    load_config()
+    print("Rooms:", list(rooms.keys()))
+    print("S1 ->", allocate_room("S1", "Arjun", "M", 1))
+    print("S2 ->", allocate_room("S2", "Kabir", "M", 2))
+    print("S3 ->", allocate_room("S3", "Rohan", "M", 3))
+    print("S4 (female) ->", allocate_room("S4", "Diya", "F", 1))
+    print("S1 again ->", allocate_room("S1", "Arjun", "M", 1))
+    print("S5 year '2' ->", allocate_room("S5", "Vikram", "M", "2"))
+    print("Occupants of A1:", rooms["A1"]["occupants"])
+    vacate_room("S2")
+    print("Occupants of A1 after S2 left:", rooms["A1"]["occupants"])
+    print("Fee for S1, 45 days:", monthly_fee("S1", 45))
+    students = [{"year": 1}, {"year": 4}, {"year": 2}]
+    print("Priority (seniors first?):", [
+        student["year"] for student in priority_order(students)
+    ])
+    print("Lottery:", room_lottery(["S6", "S7", "S8"]))
+    print("Vacant beds:", vacant_beds())
+    try:
+        print("Warden DB:", connect_warden_db())
+    except RuntimeError as error:
+        print("Warden DB:", error)
+    print("Waitlist:", waitlist)
+
+
+if __name__ == "__main__":
+    main()
